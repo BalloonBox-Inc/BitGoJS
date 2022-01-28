@@ -2,8 +2,10 @@
  * @prettier
  */
 import * as bip32 from 'bip32';
+import * as bs58 from 'bs58';
 import { BitGo } from '../bitgo';
 import * as common from '../common';
+import * as crypto from 'crypto';
 import { BaseCoin, KeychainsTriplet, SupplementGenerateWalletOptions } from './baseCoin';
 import { RequestTracer as IRequestTracer } from './types';
 import { PaginationOptions, Wallet } from './wallet';
@@ -13,6 +15,9 @@ import { sanitizeLegacyPath } from '../bip32path';
 import { getSharedSecret } from '../ecdh';
 import { BigNumber } from 'bignumber.js';
 import { promiseProps } from './promise-utils';
+import Eddsa, { KeyShare } from '@bitgo/account-lib/dist/src/mpc/tss';
+import * as openpgp from 'openpgp';
+import { Keychain } from './keychains';
 
 export interface WalletWithKeychains extends KeychainsTriplet {
   wallet: Wallet;
@@ -663,5 +668,275 @@ export class Wallets {
    */
   async getTotalBalances(params: Record<string, never> = {}): Promise<any> {
     return await this.bitgo.get(this.baseCoin.url('/wallet/balances')).result();
+  }
+
+  /* MARK: Tss wallet creation + helpers */
+  async tssCreateUserKeychain(
+    userGpgKey: openpgp.SerializedKeyPair<string>,
+    userKeyShare: KeyShare,
+    backupKeyShare: KeyShare,
+    bitgoKeychain: Keychain,
+    passphrase: string
+  ): Promise<Keychain> {
+    const MPC = await Eddsa();
+    const bitgoKeyShares = bitgoKeychain.keyShares;
+    if (!bitgoKeyShares) {
+      throw new Error('Missing BitGo key shares');
+    }
+
+    const bitGoToUserShare = bitgoKeyShares.find((keyShare) => keyShare.from === 'bitgo' && keyShare.to === 'user');
+    if (!bitGoToUserShare) {
+      throw new Error('Missing BitGo to User key share');
+    }
+
+    const bitGoToUserPrivateShareMessage = await openpgp.readMessage({
+      armoredMessage: bitGoToUserShare.privateShare,
+    });
+    const userGpgPrivateKey = await openpgp.readPrivateKey({ armoredKey: userGpgKey.privateKey });
+
+    const bitGoToUserPrivateShare = (
+      await openpgp.decrypt({
+        message: bitGoToUserPrivateShareMessage,
+        decryptionKeys: [userGpgPrivateKey],
+        format: 'utf8',
+      })
+    ).data;
+
+    // type = YShare
+    const bitgoToUser = {
+      i: '1',
+      j: '3',
+      y: Buffer.from(bs58.decode(bitGoToUserShare.publicShare)).toString('hex'),
+      u: bitGoToUserPrivateShare,
+    };
+
+    console.log(bitgoToUser);
+
+    const userCombined = MPC.keyCombine(userKeyShare.uShare, [backupKeyShare.yShares[1], bitgoToUser]);
+
+    return await this.baseCoin.keychains().add({
+      source: 'user',
+      type: 'tss',
+      commonPub: bs58.encode(Buffer.from(userCombined.pShare.y, 'hex')),
+      encryptedPrv: this.bitgo.encrypt({ input: JSON.stringify(userCombined.pShare), password: passphrase }),
+    });
+  }
+
+  async tssCreateBackupKeychain(
+    userGpgKey: openpgp.SerializedKeyPair<string>,
+    userKeyShare: KeyShare,
+    backupKeyShare: KeyShare,
+    bitgoKeychain: Keychain,
+    passphrase: string
+  ): Promise<Keychain> {
+    const MPC = await Eddsa();
+    const bitgoKeyShares = bitgoKeychain.keyShares;
+    if (!bitgoKeyShares) {
+      throw new Error('Invalid bitgo keyshares');
+    }
+
+    console.log('bitgoKeyShares', JSON.stringify(bitgoKeyShares, undefined, 2));
+
+    const bitGoToBackupShare = bitgoKeyShares.find((keyShare) => keyShare.from === 'bitgo' && keyShare.to === 'backup');
+    if (!bitGoToBackupShare) {
+      throw new Error('Missing BitGo to User key share');
+    }
+
+    const bitGoToBackupPrivateShareMessage = await openpgp.readMessage({
+      armoredMessage: bitGoToBackupShare.privateShare,
+    });
+    const userGpgPrivateKey = await openpgp.readPrivateKey({ armoredKey: userGpgKey.privateKey });
+
+    const bitGoToUserPrivateShare = (
+      await openpgp.decrypt({
+        message: bitGoToBackupPrivateShareMessage,
+        decryptionKeys: [userGpgPrivateKey],
+        format: 'utf8',
+      })
+    ).data;
+
+    // type = YShare
+    const bitgoToBackup = {
+      i: '2',
+      j: '3',
+      y: Buffer.from(bs58.decode(bitGoToBackupShare.publicShare)).toString('hex'),
+      u: bitGoToUserPrivateShare,
+    };
+
+    const backupCombined = MPC.keyCombine(backupKeyShare.uShare, [userKeyShare.yShares[2], bitgoToBackup]);
+
+    return await this.baseCoin.keychains().add({
+      source: 'backup',
+      type: 'tss',
+      commonPub: bs58.encode(Buffer.from(backupCombined.pShare.y, 'hex')),
+      encryptedPrv: this.bitgo.encrypt({ input: JSON.stringify(backupCombined.pShare), password: passphrase }),
+    });
+  }
+
+  private inputToString(input: Buffer | string): string {
+    return Buffer.from(input).toString('hex');
+  }
+
+  async tssCreateBitgoKeychain(
+    userGpgKey: openpgp.SerializedKeyPair<string>,
+    userKeyShare: KeyShare,
+    backupKeyShare: KeyShare,
+    // TODO: test only param
+    bitgoKeyShare?: KeyShare
+  ): Promise<Keychain> {
+    const constants = await this.bitgo.fetchConstants();
+    const bitgoPublicKeyStr = constants.tss.bitgoPublicKey as string;
+    const bitgoKey = await openpgp.readKey({ armoredKey: bitgoPublicKeyStr });
+
+    const userToBitGoMessage = await openpgp.createMessage({ text: this.inputToString(userKeyShare.yShares[3].u) });
+    const encUserToBitGoMessage = await openpgp.encrypt({
+      message: userToBitGoMessage,
+      encryptionKeys: [bitgoKey],
+      format: 'armored',
+      config: {
+        rejectCurves: new Set(),
+        showVersion: false,
+        showComment: false,
+      },
+    });
+
+    const backupToBitGoMessage = await openpgp.createMessage({ text: this.inputToString(backupKeyShare.yShares[3].u) });
+    const encBackupToBitGoMessage = await openpgp.encrypt({
+      message: backupToBitGoMessage,
+      encryptionKeys: [bitgoKey],
+      format: 'armored',
+      config: {
+        rejectCurves: new Set(),
+        showVersion: false,
+        showComment: false,
+      },
+    });
+
+    const userPublicShare = bs58.encode(Buffer.from(userKeyShare.yShares[3].y, 'hex'));
+    const backupPublicShare = bs58.encode(Buffer.from(backupKeyShare.yShares[3].y, 'hex'));
+
+    const createBitGoTssParams = {
+      type: 'tss',
+      source: 'bitgo',
+      keyShares: [
+        {
+          from: 'user',
+          to: 'bitgo',
+          publicShare: userPublicShare,
+          privateShare: encUserToBitGoMessage,
+        },
+        {
+          from: 'backup',
+          to: 'bitgo',
+          publicShare: backupPublicShare,
+          privateShare: encBackupToBitGoMessage,
+        },
+      ],
+      userGPGPublicKey: userGpgKey.publicKey,
+      // TODO: Create a separate GPG key?
+      backupGPGPublicKey: userGpgKey.publicKey,
+    };
+
+    console.log('createBitGoTssParams', JSON.stringify(createBitGoTssParams, undefined, 2));
+    console.log();
+
+    return await this.baseCoin.keychains().add(createBitGoTssParams);
+  }
+
+  async generateTssKeyChains(params: {
+    label: string;
+    passphrase: string;
+    userKeyShare?: KeyShare; // TODO: test only
+    backupKeyShare?: KeyShare; // TODO: test only
+    bitgoKeyShare?: KeyShare; // TODO: test only
+  }): Promise<KeychainsTriplet> {
+    const MPC = await Eddsa();
+    const m = 2;
+    const n = 3;
+
+    // USER = 1, BACKUP = 2, BITGO = 3
+
+    const userKeyShare = params.userKeyShare || MPC.keyShare(1, m, n);
+    const backupKeyShare = params.backupKeyShare || MPC.keyShare(2, m, n);
+
+    const userGpgKey = await openpgp.generateKey({
+      userIDs: [
+        {
+          name: 'randomstring',
+          email: 'randomstring@random.com',
+        },
+      ],
+    });
+
+    const bitgoKeychain = await this.tssCreateBitgoKeychain(
+      userGpgKey,
+      userKeyShare,
+      backupKeyShare,
+      params.bitgoKeyShare
+    );
+    console.log('bitgoKeychain', JSON.stringify(bitgoKeychain, undefined, 2));
+    const userKeychain = await this.tssCreateUserKeychain(
+      userGpgKey,
+      userKeyShare,
+      backupKeyShare,
+      bitgoKeychain,
+      params.passphrase
+    );
+    const backupKeychain = await this.tssCreateBackupKeychain(
+      userGpgKey,
+      userKeyShare,
+      backupKeyShare,
+      bitgoKeychain,
+      params.passphrase
+    );
+
+    // create wallet
+    const keychains = {
+      userKeychain,
+      backupKeychain,
+      bitgoKeychain,
+    };
+
+    return keychains;
+  }
+
+  /**
+   * Generates a TSS wallet
+   * TODO: merge with `generateWallet`
+   *
+   * @param params
+   */
+  async generateTssWallet(params: {
+    label: string;
+    passphrase: string;
+    userKeyShare?: KeyShare; // TODO: test only
+    backupKeyShare?: KeyShare; // TODO: test only
+    bitgoKeyShare?: KeyShare; // TODO: test only
+  }): Promise<any> {
+    const walletParams: SupplementGenerateWalletOptions = {
+      label: params.label,
+      m: 2,
+      n: 3,
+      keys: [],
+      isCold: false,
+    };
+
+    // USER = 1, BACKUP = 2, BITGO = 3
+    const keychains = await this.generateTssKeyChains(params);
+    const { userKeychain, backupKeychain, bitgoKeychain } = keychains;
+
+    walletParams.keys = [userKeychain.id, backupKeychain.id, bitgoKeychain.id];
+    const finalWalletParams = await this.baseCoin.supplementGenerateWallet(walletParams, keychains);
+    this.bitgo.setRequestTracer(new RequestTracer());
+    const newWallet = await this.bitgo.post(this.baseCoin.url('/wallet')).send(finalWalletParams).result();
+
+    const result: WalletWithKeychains = {
+      wallet: new Wallet(this.bitgo, this.baseCoin, newWallet),
+      userKeychain: userKeychain,
+      backupKeychain: backupKeychain,
+      bitgoKeychain: bitgoKeychain,
+    };
+
+    return result;
   }
 }
