@@ -273,6 +273,11 @@ export interface GetAddressOptions {
   reqId?: RequestTracer;
 }
 
+export interface DeployForwardersOptions {
+  address?: string;
+  id?: string;
+}
+
 export interface CreateAddressApiParams {
   chain?: number;
   gasPrice?: number | string;
@@ -1097,6 +1102,32 @@ export class Wallet {
     }
     this._wallet = await this.bitgo.put(this.url()).send(forwarderFlags).result();
   }
+
+  /**
+     * To manually deploy an ETH address
+     * @param DeployForwardersOptions {Object} - {
+        "id": {String},      
+        "address": {String},
+       }
+     }
+     */
+  async deployForwarders(params: DeployForwardersOptions): Promise<any> {
+    if (_.isUndefined(params.address) && _.isUndefined(params.id)) {
+      throw new Error('address or id of address required');
+    }
+    let query;
+    if (params.address) {
+      query = params.address;
+    } else {
+      query = params.id;
+    }
+    this._wallet = await this.bitgo
+      .post(this.url(`/address/${encodeURIComponent(query)}/deployment`))
+      .send(params)
+      .result();
+    return this._wallet;
+  }
+
   /**
    * Sweep funds for a wallet
    *
