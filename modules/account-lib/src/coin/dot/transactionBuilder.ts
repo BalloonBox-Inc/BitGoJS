@@ -14,10 +14,12 @@ import { KeyPair } from './keyPair';
 import { Transaction } from './transaction';
 import { BaseTransactionSchema, SignedTransactionSchema, SigningPayloadTransactionSchema } from './txnSchema';
 import { default as utils } from './utils';
+import {rawTx} from "../../../test/resources/dot";
 
 export abstract class TransactionBuilder extends BaseTransactionBuilder {
   protected _transaction: Transaction;
   protected _keyPair: KeyPair;
+  protected _signature?: any;
   protected _sender: string;
 
   protected _blockNumber: number;
@@ -181,6 +183,7 @@ export abstract class TransactionBuilder extends BaseTransactionBuilder {
       registry: this._registry,
     }) as DecodedSigningPayload | DecodedSignedTx;
     if (utils.isSigningPayload(decodedTxn)) {
+      this._signature = utils.recoverSignatureFromRawTx(rawTransaction, {registry: this._registry});
       this.referenceBlock(decodedTxn.blockHash);
     } else {
       this.sender({ address: utils.decodeDotAddress(decodedTxn.address) });
@@ -206,6 +209,12 @@ export abstract class TransactionBuilder extends BaseTransactionBuilder {
     this.transaction.chainName(this._material.chainName);
     if (this._keyPair) {
       this.transaction.sign(this._keyPair);
+    } else if (this._signature){
+      utils.serializeSignedTransaction(
+          this.transaction._dotTransaction,
+          this._signature,
+          this._material.metadata as `0x${string}`,
+          this._registry);
     }
     this._transaction.loadInputsAndOutputs();
     return this._transaction;

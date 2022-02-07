@@ -12,10 +12,11 @@ import base32 from 'hi-base32';
 import { KeyPair } from '.';
 import { BaseUtils } from '../baseCoin';
 import { Seed } from '../baseCoin/iface';
-import { ProxyCallArgs, TransferArgs, ProxyArgs, TxMethod, Material } from './iface';
+import {ProxyCallArgs, TransferArgs, ProxyArgs, TxMethod, Material, TxData} from './iface';
 import nacl from 'tweetnacl';
 import { BaseCoin as CoinConfig, DotNetwork } from '@bitgo/statics';
 import { createTypeUnsafe, GenericExtrinsicPayload, GenericCall, GenericExtrinsic } from '@polkadot/types';
+import type { EcdsaSignature, Ed25519Signature,  Sr25519Signature } from '@polkadot/types/interfaces/extrinsics';
 
 const PROXY_METHOD_ARG = 2;
 export class Utils implements BaseUtils {
@@ -168,11 +169,14 @@ export class Utils implements BaseUtils {
       .sign(pair);
 
     // Serialize a signed transaction.
-    const txHex = construct.signedTx(transaction, signature, {
+    return this.serializeSignedTransaction(transaction, signature, metadataRpc, registry);
+  }
+
+  serializeSignedTransaction(transaction, signature, metadataRpc: `0x${string}`, registry) {
+    return construct.signedTx(transaction, signature, {
       metadataRpc,
       registry,
     });
-    return txHex;
   }
 
   /**
@@ -230,6 +234,15 @@ export class Utils implements BaseUtils {
 
   isTransfer(arg: TxMethod['args']): arg is TransferArgs {
     return (arg as TransferArgs).dest?.id !== undefined && (arg as TransferArgs).value !== undefined;
+  }
+
+  recoverSignatureFromRawTx(rawTx: string, options: { registry: TypeRegistry },
+  ): EcdsaSignature | Ed25519Signature | Sr25519Signature {
+    const { registry } = options;
+    const methodCall = registry.createType('Extrinsic', rawTx, {
+      isSigned: true,
+    });
+    return methodCall.signature;
   }
 }
 

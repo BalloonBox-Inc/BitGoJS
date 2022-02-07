@@ -21,7 +21,7 @@ import {
 import utils from './utils';
 
 export class Transaction extends BaseTransaction {
-  protected _dotTransaction: UnsignedTransaction;
+  public _dotTransaction: UnsignedTransaction;
   private _signedTransaction?: string;
   private _registry: TypeRegistry;
   private _chainName: string;
