@@ -1,1 +1,1 @@
-worker: node modules/express/bin/bitgo-express
+web: node modules/express/bin/bitgo-express

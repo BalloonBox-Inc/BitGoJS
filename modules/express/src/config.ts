@@ -17,7 +17,7 @@ function readEnvVar(name, ...deprecatedAliases): string | undefined {
 }
 
 export interface Config {
-  port: number;
+  port: number | string;
   bind: string;
   ipc?: string;
   env: EnvironmentName;
@@ -81,7 +81,7 @@ export const EnvConfig = (): Partial<Config> => ({
 });
 
 export const DefaultConfig: Config = {
-  port: 3080,
+  port: process.env.PORT || 3080,
   bind: 'localhost',
   env: 'test',
   debugNamespace: [],
