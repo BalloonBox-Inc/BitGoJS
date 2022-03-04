@@ -1,1 +1,1 @@
-web: node modules/express/bin/bitgo-express
+web: node modules/express/bin/bitgo-express "--port" "4000"
